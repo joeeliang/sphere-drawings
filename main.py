@@ -2,28 +2,34 @@ import pygame
 import sys
 import math
 import random
+from PIL import Image
 
 # --- Constants ---
-WIDTH, HEIGHT = 800, 600
+WIDTH, HEIGHT = 700,700
 GRAVITY = pygame.math.Vector2(0, 981)  # Pixels per second^2
-BACKGROUND_COLOR = (20, 20, 40)
+BACKGROUND_COLOR = (0,0,0)
 BOUNCE_LOSS = 0.9 # Energy retained after bouncing off walls
 COLLISION_DAMPING = 0.95 # Energy retained after inter-ball collision
-MIN_RADIUS = 5
-MAX_RADIUS = 20
+MIN_RADIUS = 10
+MAX_RADIUS = 27
+SPAWN_STEP_INTERVAL = 1  # Spawn new ball every N steps
+FIXED_DT = 1/60.0
+MODE = "SPAeWN"
+TOTAL_STEPS = 400
 SIMULATION_SUBSTEPS = 8 # Increase for more accuracy, decrease for performance
-MAX_OBJECTS = 500 # Limit the number of objects
+MAX_OBJECTS = 380 # Limit the number of objects
 
 # --- Ball Class ---
 class Ball:
     """Represents a single ball in the physics simulation."""
-    def __init__(self, position, radius, color=None):
+    def __init__(self, position, radius, step_added, color=None):
         self.position = pygame.math.Vector2(position)
         # Verlet integration uses current and previous position to infer velocity
         self.old_position = pygame.math.Vector2(position)
         self.acceleration = pygame.math.Vector2(0, 0)
         self.radius = radius
         self.mass = math.pi * radius**2 # Mass proportional to area
+        self.step_added = step_added
         self.color = color if color else (random.randint(100, 255), random.randint(100, 255), random.randint(100, 255))
 
     def update(self, dt):
@@ -77,16 +83,23 @@ class Ball:
 
 # --- Simulation Class ---
 class Simulation:
-    """Manages the overall physics simulation."""
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("Verlet Physics Simulation")
-        self.clock = pygame.time.Clock()
+        pygame.display.set_caption("Deterministic Physics Simulation")
         self.balls = []
         self.font = pygame.font.Font(None, 30)
-        self.spawn_timer = 0  # Add timer for automatic spawning
-        self.spawn_interval = 0.05  # Spawn a new ball every 0.1 seconds
+        self.current_step = 0
+        self.clock = pygame.time.Clock()  # Add clock
+        random.seed(42)
+
+        self.input_image = None
+        try:
+            # Load and resize the input image to match simulation dimensions
+            self.input_image = Image.open('input_image.jpg').convert('RGB')
+            self.input_image = self.input_image.resize((WIDTH, HEIGHT))
+        except:
+            print("No input image found - will skip image mapping")
 
 
     def add_ball(self, ball):
@@ -186,35 +199,80 @@ class Simulation:
         for ball in self.balls:
             ball.draw(self.screen)
 
-        # Display object count
-        count_text = self.font.render(f"Objects: {len(self.balls)}/{MAX_OBJECTS}", True, (200, 200, 200))
-        self.screen.blit(count_text, (10, 10))
+        # Display step and object count in a single line
+        stats_text = self.font.render(f"Step: {self.current_step}/{TOTAL_STEPS} | Objects: {len(self.balls)}/{MAX_OBJECTS}", True, (200, 200, 200))
+        self.screen.blit(stats_text, (10, 10))
 
         pygame.display.flip()
 
+    
+    def map_balls_to_image(self):
+        """Maps final ball positions to image colors and updates the CSV."""
+        if MODE != "SPAWN" or not self.input_image:
+            return
+            
+        # Read all existing ball data
+        with open('ball_spawns.csv', 'r') as f:
+            lines = f.readlines()
+            
+        # Sort balls by step_added to maintain correspondence with CSV
+        sorted_balls = sorted(self.balls, key=lambda x: x.step_added)
+        
+        # Create new CSV content with updated colors
+        new_lines = []
+        for i, line in enumerate(lines):
+            if i >= len(sorted_balls):
+                break
+                
+            ball = sorted_balls[i]
+            # Get pixel color from input image at ball's position
+            x = min(max(int(ball.position.x), 0), WIDTH - 1)
+            y = min(max(int(ball.position.y), 0), HEIGHT - 1)
+            r, g, b = self.input_image.getpixel((x, y))
+            
+            # Parse original line
+            step, x, y, radius, old_x, old_y, _, _, _ = map(float, line.strip().split(','))
+            
+            # Create new line with updated color values
+            new_line = f"{int(step)},{x},{y},{radius},{old_x},{old_y},{r},{g},{b}\n"
+            new_lines.append(new_line)
+            
+        # Write updated data back to CSV
+        with open('ball_spawns.csv', 'w') as f:
+            f.writelines(new_lines)
+
+
     def run(self):
-            """Main simulation loop."""
-            running = True
-            while running:
-                dt = self.clock.tick(60) / 1000.0  # Delta time in seconds
+        """Main simulation loop using fixed timesteps."""
+        running = True
+        balls_spawned = 0
+        if MODE != "SPAWN":
+            # Read all balls from CSV at start
+            with open('ball_spawns.csv', 'r') as f:
+                for line in f:
+                    step, x, y, radius, old_x, old_y, r, g, b = map(float, line.strip().split(','))
+                    if balls_spawned >= MAX_OBJECTS:
+                        break
+        else:
+            with open('ball_spawns.csv', 'w') as f:
+                f.write("")  # Clear the file
 
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        running = False
-
-                # Automatic ball spawning
-                self.spawn_timer += dt
-                if self.spawn_timer >= self.spawn_interval:
-                    self.spawn_timer = 0  # Reset timer
-                    
+        while running and self.current_step < TOTAL_STEPS:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+            self.clock.tick(60)
+            # Spawn balls at fixed intervals
+            if MODE == "SPAWN":
+                if self.current_step % SPAWN_STEP_INTERVAL == 0 and balls_spawned < MAX_OBJECTS:
                     # Create a ball at the center of the screen
                     center_pos = (WIDTH/2, HEIGHT/2)
                     radius = random.uniform(MIN_RADIUS, MAX_RADIUS)
-                    new_ball = Ball(center_pos, radius)
+                    new_ball = Ball(center_pos, radius, step_added=self.current_step)
 
                     # Calculate random angle for uniform circular distribution
                     angle = random.uniform(0, 2 * math.pi)
-                    blast_speed = 200  # pixels/sec - adjust this value to change speed
+                    blast_speed = 100
                     
                     # Calculate velocity vector from angle
                     velocity = pygame.math.Vector2(
@@ -222,15 +280,44 @@ class Simulation:
                         math.sin(angle) * blast_speed
                     )
                     
-                    # Set old_position based on desired initial velocity for Verlet
-                    new_ball.old_position = new_ball.position - velocity * dt
+                    # Set old_position based on desired initial velocity
+                    new_ball.old_position = new_ball.position - velocity * FIXED_DT
+                    # Save ball attributes to CSV
+                    with open('ball_spawns.csv', 'a') as f:
+                        f.write(f"{self.current_step},{new_ball.position.x},{new_ball.position.y},{new_ball.radius},{new_ball.old_position.x},{new_ball.old_position.y},{new_ball.color[0]},{new_ball.color[1]},{new_ball.color[2]}\n")
                     self.add_ball(new_ball)
+                    balls_spawned += 1
+            else:
+                with open('ball_spawns.csv', 'r') as f:
+                    for _ in range(balls_spawned):  # Skip already processed lines
+                        next(f)
+                    line = next(f, None)  # Get the next line
+                    if line:
+                        step, x, y, radius, old_x, old_y, r, g, b = map(float, line.strip().split(','))
+                        if self.current_step == int(step):
+                            new_ball = Ball((x, y), radius, step, (int(r), int(g), int(b)))
+                            new_ball.old_position = pygame.math.Vector2(old_x, old_y)
+                            self.add_ball(new_ball)
+                            balls_spawned += 1
 
-                self.update(dt)
-                self.draw()
+            # Update simulation with fixed timestep
+            self.update(FIXED_DT)
+            self.draw()
+            
+            # Display step count
+            pygame.display.flip()
+            
+            self.current_step += 1
+            # Wait for user to close window
 
-            pygame.quit()
-            sys.exit()
+        self.map_balls_to_image()
+        
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+        # pygame.quit()
+        # sys.exit()
 
 # --- Start Simulation ---
 if __name__ == "__main__":
