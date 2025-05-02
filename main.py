@@ -5,19 +5,24 @@ import random
 from PIL import Image
 
 # --- Constants ---
-WIDTH, HEIGHT = 700,700
+INPUT_IMAGE_PATH = "input_image.jpg"
+WIDTH, HEIGHT = 1000,1000
 GRAVITY = pygame.math.Vector2(0, 981)  # Pixels per second^2
 BACKGROUND_COLOR = (0,0,0)
 BOUNCE_LOSS = 0.9 # Energy retained after bouncing off walls
 COLLISION_DAMPING = 0.95 # Energy retained after inter-ball collision
-MIN_RADIUS = 10
-MAX_RADIUS = 27
+MIN_RADIUS = 5
+MAX_RADIUS = 28
 SPAWN_STEP_INTERVAL = 1  # Spawn new ball every N steps
 FIXED_DT = 1/60.0
-MODE = "SPAeWN"
-TOTAL_STEPS = 400
+MODE = "SPAWN"
+TOTAL_STEPS = 1000
 SIMULATION_SUBSTEPS = 8 # Increase for more accuracy, decrease for performance
-MAX_OBJECTS = 380 # Limit the number of objects
+MAX_OBJECTS = 900 # Limit the number of objects
+# Grid constants for spatial hashing
+CELL_SIZE = MAX_RADIUS * 2  # Size of each grid cell
+GRID_WIDTH = math.ceil(WIDTH / CELL_SIZE)
+GRID_HEIGHT = math.ceil(HEIGHT / CELL_SIZE)
 
 # --- Ball Class ---
 class Ball:
@@ -91,12 +96,13 @@ class Simulation:
         self.font = pygame.font.Font(None, 30)
         self.current_step = 0
         self.clock = pygame.time.Clock()  # Add clock
+        self.grid = {}  # Spatial hash grid
         random.seed(42)
 
         self.input_image = None
         try:
             # Load and resize the input image to match simulation dimensions
-            self.input_image = Image.open('input_image.jpg').convert('RGB')
+            self.input_image = Image.open(INPUT_IMAGE_PATH).convert('RGB')
             self.input_image = self.input_image.resize((WIDTH, HEIGHT))
         except:
             print("No input image found - will skip image mapping")
@@ -125,63 +131,72 @@ class Simulation:
         for ball in self.balls:
             ball.apply_constraints()
 
+    def get_cell_index(self, position):
+        """Convert a position to grid cell indices."""
+        cell_x = int(position.x / CELL_SIZE)
+        cell_y = int(position.y / CELL_SIZE)
+        return cell_x, cell_y
+        
+    def update_grid(self):
+        """Update the spatial hash grid with current ball positions."""
+        self.grid.clear()
+        for ball in self.balls:
+            cell_x, cell_y = self.get_cell_index(ball.position)
+            cell_key = (cell_x, cell_y)
+            if cell_key not in self.grid:
+                self.grid[cell_key] = []
+            self.grid[cell_key].append(ball)
+            
+    def get_nearby_balls(self, ball):
+        """Get all balls in neighboring cells."""
+        cell_x, cell_y = self.get_cell_index(ball.position)
+        nearby_balls = []
+        
+        # Check 3x3 neighborhood of cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell_key = (cell_x + dx, cell_y + dy)
+                if cell_key in self.grid:
+                    nearby_balls.extend(self.grid[cell_key])
+                    
+        return nearby_balls
+    
     def solve_collisions(self):
-        """Detects and resolves collisions between balls."""
-        num_balls = len(self.balls)
-        for i in range(num_balls):
-            ball_1 = self.balls[i]
-            for j in range(i + 1, num_balls):
-                ball_2 = self.balls[j]
-
+        """Detects and resolves collisions between balls using spatial hashing."""
+        # Update spatial hash grid
+        self.update_grid()
+        
+        # Check collisions using grid
+        for ball_1 in self.balls:
+            nearby_balls = self.get_nearby_balls(ball_1)
+            
+            for ball_2 in nearby_balls:
+                # Skip self-collision
+                if ball_1 is ball_2:
+                    continue
+                    
                 # Vector from ball_1 center to ball_2 center
                 collision_axis = ball_1.position - ball_2.position
                 dist_sq = collision_axis.length_squared()
                 min_dist = ball_1.radius + ball_2.radius
 
-                # Check if balls are overlapping (using squared distance for efficiency)
-                if dist_sq < min_dist * min_dist and dist_sq > 0: # Ensure dist_sq is not zero
+                # Check if balls are overlapping
+                if dist_sq < min_dist * min_dist and dist_sq > 0:
                     dist = math.sqrt(dist_sq)
-                    # Normalized collision axis
                     normal = collision_axis / dist
-                    # Amount of overlap
-                    overlap = (min_dist - dist) * 0.5 # Divide by 2 as both balls move
+                    overlap = (min_dist - dist) * 0.5
 
-                    # Separate the balls based on mass (lighter moves more)
-                    # Calculate total mass for mass ratio calculation
+                    # Resolve collision
                     total_mass = ball_1.mass + ball_2.mass
-                    if total_mass == 0: # Avoid division by zero if both masses are somehow zero
-                         mass_ratio_1 = 0.5
-                         mass_ratio_2 = 0.5
+                    if total_mass == 0:
+                        mass_ratio_1 = mass_ratio_2 = 0.5
                     else:
                         mass_ratio_1 = ball_2.mass / total_mass if ball_1.mass > 0 else 1.0
                         mass_ratio_2 = ball_1.mass / total_mass if ball_2.mass > 0 else 1.0
 
-
-                    # Move balls apart along the normal vector
                     separation_vector = normal * overlap
                     ball_1.position += separation_vector * mass_ratio_1 * COLLISION_DAMPING
                     ball_2.position -= separation_vector * mass_ratio_2 * COLLISION_DAMPING
-
-                    # # --- Adjust old_position to conserve momentum visually ---
-                    # # This part is crucial for Verlet integration to handle collisions correctly
-                    # # Without adjusting old_position, balls might gain energy or stick together unnaturally
-                    # vel1 = ball_1.position - ball_1.old_position
-                    # vel2 = ball_2.position - ball_2.old_position
-
-                    # # Reflect velocities along the collision normal (simplified elastic collision)
-                    # relative_velocity = vel1 - vel2
-                    # impulse_magnitude = relative_velocity.dot(normal)
-
-                    # if total_mass > 0:
-                    #     impulse = (-(1 + COLLISION_DAMPING) * impulse_magnitude / total_mass) * normal
-                    #     # Apply impulse scaled by mass ratio
-                    #     vel1 += impulse * ball_2.mass
-                    #     vel2 -= impulse * ball_1.mass
-
-                    # # Update old_position based on the new velocity after collision resolution
-                    # ball_1.old_position = ball_1.position - vel1
-                    # ball_2.old_position = ball_2.position - vel2
-
 
     def update(self, dt):
         """Performs a full simulation step, including sub-steps."""
@@ -241,83 +256,98 @@ class Simulation:
         with open('ball_spawns.csv', 'w') as f:
             f.writelines(new_lines)
 
-
-    def run(self):
-        """Main simulation loop using fixed timesteps."""
+    def calculate_positions(self):
+        """Runs simulation without display to generate ball positions."""
+        print("Starting fast calculation phase...")
+        self.current_step = 0
+        balls_spawned = 0
+        
+        # Pre-allocate the CSV content in memory
+        csv_lines = []
+        
+        # Run simulation without display or timing constraints
+        while self.current_step < TOTAL_STEPS:
+            # Spawn balls at fixed intervals
+            if self.current_step % SPAWN_STEP_INTERVAL == 0 and balls_spawned < MAX_OBJECTS:
+                center_pos = (WIDTH/2, HEIGHT/2)
+                radius = random.uniform(MIN_RADIUS, MAX_RADIUS)
+                new_ball = Ball(center_pos, radius, step_added=self.current_step)
+                
+                angle = random.uniform(0, 2 * math.pi)
+                blast_speed = 40
+                velocity = pygame.math.Vector2(
+                    math.cos(angle) * blast_speed,
+                    math.sin(angle) * blast_speed
+                )
+                new_ball.old_position = new_ball.position - velocity * FIXED_DT
+                
+                # Store line in memory instead of writing to file
+                csv_lines.append(
+                    f"{self.current_step},{new_ball.position.x},{new_ball.position.y},"
+                    f"{new_ball.radius},{new_ball.old_position.x},{new_ball.old_position.y},"
+                    f"{new_ball.color[0]},{new_ball.color[1]},{new_ball.color[2]}\n"
+                )
+                
+                self.add_ball(new_ball)
+                balls_spawned += 1
+            
+            # Update physics without any delay
+            self.update(FIXED_DT)
+            self.current_step += 1
+            
+            # Print progress every 100 steps
+            if self.current_step % 100 == 0:
+                print(f"Calculated {self.current_step}/{TOTAL_STEPS} steps...")
+        
+        # Write all data to CSV at once
+        print("Writing results to CSV...")
+        with open('ball_spawns.csv', 'w') as f:
+            f.writelines(csv_lines)
+        
+        # Map final positions to image colors
+        print("Mapping colors from input image...")
+        self.map_balls_to_image()
+        print("Calculation phase complete!")
+        
+    def display_simulation(self):
+        """Displays the final simulation using the generated CSV."""
+        self.balls = []
+        self.current_step = 0
         running = True
         balls_spawned = 0
-        if MODE != "SPAWN":
-            # Read all balls from CSV at start
-            with open('ball_spawns.csv', 'r') as f:
-                for line in f:
-                    step, x, y, radius, old_x, old_y, r, g, b = map(float, line.strip().split(','))
-                    if balls_spawned >= MAX_OBJECTS:
-                        break
-        else:
-            with open('ball_spawns.csv', 'w') as f:
-                f.write("")  # Clear the file
-
-        while running and self.current_step < TOTAL_STEPS:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-            self.clock.tick(60)
-            # Spawn balls at fixed intervals
-            if MODE == "SPAWN":
-                if self.current_step % SPAWN_STEP_INTERVAL == 0 and balls_spawned < MAX_OBJECTS:
-                    # Create a ball at the center of the screen
-                    center_pos = (WIDTH/2, HEIGHT/2)
-                    radius = random.uniform(MIN_RADIUS, MAX_RADIUS)
-                    new_ball = Ball(center_pos, radius, step_added=self.current_step)
-
-                    # Calculate random angle for uniform circular distribution
-                    angle = random.uniform(0, 2 * math.pi)
-                    blast_speed = 100
-                    
-                    # Calculate velocity vector from angle
-                    velocity = pygame.math.Vector2(
-                        math.cos(angle) * blast_speed,
-                        math.sin(angle) * blast_speed
-                    )
-                    
-                    # Set old_position based on desired initial velocity
-                    new_ball.old_position = new_ball.position - velocity * FIXED_DT
-                    # Save ball attributes to CSV
-                    with open('ball_spawns.csv', 'a') as f:
-                        f.write(f"{self.current_step},{new_ball.position.x},{new_ball.position.y},{new_ball.radius},{new_ball.old_position.x},{new_ball.old_position.y},{new_ball.color[0]},{new_ball.color[1]},{new_ball.color[2]}\n")
-                    self.add_ball(new_ball)
-                    balls_spawned += 1
-            else:
-                with open('ball_spawns.csv', 'r') as f:
-                    for _ in range(balls_spawned):  # Skip already processed lines
-                        next(f)
-                    line = next(f, None)  # Get the next line
-                    if line:
-                        step, x, y, radius, old_x, old_y, r, g, b = map(float, line.strip().split(','))
-                        if self.current_step == int(step):
-                            new_ball = Ball((x, y), radius, step, (int(r), int(g), int(b)))
-                            new_ball.old_position = pygame.math.Vector2(old_x, old_y)
-                            self.add_ball(new_ball)
-                            balls_spawned += 1
-
-            # Update simulation with fixed timestep
-            self.update(FIXED_DT)
-            self.draw()
-            
-            # Display step count
-            pygame.display.flip()
-            
-            self.current_step += 1
-            # Wait for user to close window
-
-        self.map_balls_to_image()
         
         while running:
+            self.clock.tick(60)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-        # pygame.quit()
-        # sys.exit()
+                    
+            # Read next ball from CSV if it's time
+            with open('ball_spawns.csv', 'r') as f:
+                for _ in range(balls_spawned):  # Skip processed lines
+                    next(f)
+                line = next(f, None)
+                if line:
+                    step, x, y, radius, old_x, old_y, r, g, b = map(float, line.strip().split(','))
+                    if self.current_step == int(step):
+                        new_ball = Ball((x, y), radius, step, (int(r), int(g), int(b)))
+                        new_ball.old_position = pygame.math.Vector2(old_x, old_y)
+                        self.add_ball(new_ball)
+                        balls_spawned += 1
+            
+            self.update(FIXED_DT)
+            self.draw()
+            self.current_step += 1
+            
+        pygame.quit()
+        sys.exit()
+
+    def run(self):
+        """Main entry point that runs calculation then display."""
+        print("Calculating ball positions...")
+        self.calculate_positions()
+        print("Displaying simulation...")
+        self.display_simulation()
 
 # --- Start Simulation ---
 if __name__ == "__main__":
